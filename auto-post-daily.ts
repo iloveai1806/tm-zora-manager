@@ -1,0 +1,541 @@
+// auto-post-daily.ts - Automated daily Zora posting from @tokenmetricsinc Twitter
+import 'dotenv/config';
+import { TwitterApi } from 'twitter-api-v2';
+import { createCoin, CreateConstants, setApiKey, createMetadataBuilder, createZoraUploaderForCreator } from "@zoralabs/coins-sdk";
+import { Address, Hex, createWalletClient, createPublicClient, http } from "viem";
+import { base } from "viem/chains";
+import { privateKeyToAccount } from "viem/accounts";
+import fs from 'node:fs/promises';
+import https from 'node:https';
+import path from 'node:path';
+import OpenAI from 'openai';
+
+// Enhanced Node.js File polyfill that works with FormData
+import { Blob } from 'node:buffer';
+
+class NodeFile extends Blob {
+  public name: string;
+  public lastModified: number;
+
+  constructor(
+    fileBits: BlobPart[],
+    fileName: string,
+    options?: { type?: string; lastModified?: number }
+  ) {
+    super(fileBits, { type: options?.type });
+    this.name = fileName;
+    this.lastModified = options?.lastModified || Date.now();
+  }
+
+  get [Symbol.toStringTag]() {
+    return 'File';
+  }
+}
+
+// Set global File to our enhanced polyfill
+global.File = NodeFile as any;
+
+// Initialize OpenAI client
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY!,
+});
+
+interface TwitterPost {
+  id: string;
+  text: string;
+  created_at: string;
+  conversation_id: string;
+  referenced_tweets?: Array<{
+    type: string;
+    id: string;
+  }>;
+  attachments?: {
+    media_keys?: string[];
+  };
+  public_metrics: {
+    retweet_count: number;
+    reply_count: number;
+    like_count: number;
+    quote_count: number;
+  };
+}
+
+interface TwitterMedia {
+  media_key: string;
+  type: string;
+  url?: string;
+  preview_image_url?: string;
+}
+
+// Thread detection and processing functions
+function isPartOfThread(tweet: TwitterPost): boolean {
+  // Check if it has referenced_tweets with type "replied_to"
+  const hasRepliedTo = tweet.referenced_tweets?.some(ref => ref.type === "replied_to");
+  
+  // Check if conversation_id differs from tweet ID (means it's a reply)
+  const isReply = tweet.conversation_id !== tweet.id;
+  
+  return hasRepliedTo || isReply;
+}
+
+async function getFullThread(conversationId: string, bearerToken: string): Promise<TwitterPost[]> {
+  const url = `https://api.twitter.com/2/tweets/search/recent`;
+  const params = new URLSearchParams({
+    query: `conversation_id:${conversationId}`,
+    'tweet.fields': 'conversation_id,in_reply_to_user_id,author_id,created_at,referenced_tweets,public_metrics,attachments',
+    'expansions': 'author_id,in_reply_to_user_id,referenced_tweets.id,attachments.media_keys',
+    'media.fields': 'type,url,preview_image_url,width,height',
+    'max_results': '100'
+  });
+
+  const response = await fetch(`${url}?${params}`, {
+    headers: {
+      'Authorization': `Bearer ${bearerToken}`,
+      'Content-Type': 'application/json'
+    }
+  });
+
+  if (!response.ok) {
+    throw new Error(`Twitter API error: ${response.status} ${response.statusText}`);
+  }
+
+  const data = await response.json();
+  return data.data || [];
+}
+
+function findFirstTweet(tweets: TwitterPost[]): TwitterPost | undefined {
+  return tweets.find(tweet => 
+    !tweet.referenced_tweets?.some(ref => ref.type === "replied_to")
+  );
+}
+
+function sortThreadChronologically(tweets: TwitterPost[]): TwitterPost[] {
+  return tweets.sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
+}
+
+async function summarizeThread(tweets: TwitterPost[]): Promise<string> {
+  const threadText = tweets.map((tweet, index) => 
+    `${index + 1}. ${tweet.text}`
+  ).join('\n');
+
+  try {
+    const response = await openai.responses.create({
+      model: 'gpt-4.1',
+      input: `Please summarize this Twitter thread concisely for social media use (under 250 characters):\n\n${threadText}`,
+      instructions: 'You are a helpful assistant that summarizes Twitter threads concisely. Provide a clear summary that captures the main points and key insights from the thread. Keep it under 250 characters for social media use.',
+      max_output_tokens: 150
+    });
+
+    return response.output_text || '';
+  } catch (error: any) {
+    console.error('OpenAI API error:', error);
+    // Fallback: use first tweet's text if summarization fails
+    return tweets[0]?.text || '';
+  }
+}
+
+async function processTwitterContent(tweet: TwitterPost, bearerToken: string): Promise<{ content: string, firstTweetId: string }> {
+  try {
+    console.log('🧵 Checking if tweet is part of a thread...');
+    
+    if (!isPartOfThread(tweet)) {
+      console.log('📝 Single tweet detected');
+      return {
+        content: tweet.text,
+        firstTweetId: tweet.id
+      };
+    }
+
+    console.log('🧵 Thread detected, fetching full thread...');
+    
+    try {
+      const allTweets = await getFullThread(tweet.conversation_id, bearerToken);
+      
+      if (allTweets.length <= 1) {
+        console.log('📝 Only one tweet in thread, using original content');
+        return {
+          content: tweet.text,
+          firstTweetId: tweet.id
+        };
+      }
+
+      const sortedTweets = sortThreadChronologically(allTweets);
+      const firstTweet = findFirstTweet(allTweets);
+      
+      console.log(`🧵 Found ${sortedTweets.length} tweets in thread, summarizing...`);
+      const summary = await summarizeThread(sortedTweets);
+      
+      return {
+        content: summary,
+        firstTweetId: firstTweet?.id || tweet.conversation_id
+      };
+      
+    } catch (error: any) {
+      console.warn('⚠️ Failed to fetch thread, using original tweet:', error.message);
+      return {
+        content: tweet.text,
+        firstTweetId: tweet.conversation_id
+      };
+    }
+
+  } catch (error: any) {
+    console.error('❌ Error processing Twitter content:', error);
+    return {
+      content: tweet.text,
+      firstTweetId: tweet.id
+    };
+  }
+}
+
+// Deduplication system
+const POSTED_TWEETS_FILE = 'posted-tweets.json';
+
+interface PostedTweetRecord {
+  tweetId: string;
+  coinName: string;
+  zoraTransaction: string;
+  postedAt: string;
+}
+
+async function loadPostedTweets(): Promise<Set<string>> {
+  try {
+    const data = await fs.readFile(POSTED_TWEETS_FILE, 'utf8');
+    const records: PostedTweetRecord[] = JSON.parse(data);
+    return new Set(records.map(record => record.tweetId));
+  } catch (error) {
+    // File doesn't exist yet, return empty set
+    return new Set();
+  }
+}
+
+async function savePostedTweet(record: PostedTweetRecord): Promise<void> {
+  try {
+    let records: PostedTweetRecord[] = [];
+    
+    // Load existing records
+    try {
+      const data = await fs.readFile(POSTED_TWEETS_FILE, 'utf8');
+      records = JSON.parse(data);
+    } catch (error) {
+      // File doesn't exist, start with empty array
+    }
+    
+    // Add new record
+    records.push(record);
+    
+    // Keep only the last 1000 records to prevent the file from growing too large
+    if (records.length > 1000) {
+      records = records.slice(-1000);
+    }
+    
+    // Save back to file
+    await fs.writeFile(POSTED_TWEETS_FILE, JSON.stringify(records, null, 2));
+    console.log('✅ Tweet ID saved to deduplication file');
+    
+  } catch (error: any) {
+    console.error('⚠️  Failed to save posted tweet record:', error.message);
+    // Don't throw - this shouldn't break the main flow
+  }
+}
+
+async function getLatestImagePost(alreadyPosted: Set<string>): Promise<{ post: TwitterPost, imageUrl: string }> {
+  console.log('🐦 Fetching latest post from @tokenmetricsinc...');
+  console.log('💡 Optimized for minimal API usage');
+  
+  const twitterClient = new TwitterApi({
+    appKey: process.env.TWITTER_API_KEY!,
+    appSecret: process.env.TWITTER_API_SECRET!,
+    accessToken: process.env.TWITTER_ACCESS_TOKEN!,
+    accessSecret: process.env.TWITTER_ACCESS_TOKEN_SECRET!,
+  });
+
+  try {
+    // Use known user ID to save 1 API call (from: 1136430327176581120)
+    const userId = '1136430327176581120'; // @tokenmetricsinc
+    console.log('✅ Using cached user ID for @tokenmetricsinc');
+
+    // Get recent tweets with media - optimized to 10 tweets max to save API quota
+    console.log('📡 Making single API call for tweets (max 10)...');
+    const tweets = await twitterClient.v2.userTimeline(userId, {
+      max_results: 10, // Reduced from 20 to minimize API usage
+      'tweet.fields': ['created_at', 'public_metrics', 'attachments', 'referenced_tweets', 'conversation_id'],
+      'media.fields': ['type', 'url', 'preview_image_url', 'width', 'height'],
+      expansions: ['attachments.media_keys'],
+      exclude: ['retweets'] // Only exclude retweets, we'll filter replies manually
+    });
+
+    // Access the actual tweet data from the paginator
+    const tweetData = tweets._realData?.data || [];
+    const mediaData = tweets._realData?.includes?.media || [];
+
+    if (!tweetData || tweetData.length === 0) {
+      throw new Error('No tweets found');
+    }
+
+    console.log(`📊 Analyzing ${tweetData.length} recent tweets...`);
+    console.log(`🔍 Already posted: ${alreadyPosted.size} tweets tracked`);
+    console.log(`📷 Available media attachments: ${mediaData.length}`);
+
+    // Find the latest tweet with image(s), excluding reposts, replies, videos, and already posted
+    for (const tweet of tweetData) {
+      console.log(`🔍 Checking tweet ${tweet.id}...`);
+      
+      // Skip already posted tweets
+      if (alreadyPosted.has(tweet.id)) {
+        console.log('  ❌ Already posted to Zora - skipping');
+        continue;
+      }
+      
+      // Skip replies (tweets that start with @username or have referenced_tweets of type 'replied_to')
+      if (tweet.text.startsWith('@') || 
+          (tweet.referenced_tweets && tweet.referenced_tweets.some(ref => ref.type === 'replied_to'))) {
+        console.log('  ❌ Skipping reply tweet');
+        continue;
+      }
+
+      // Skip retweets (tweets that start with RT or have referenced_tweets of type 'retweeted')
+      if (tweet.text.startsWith('RT @') || 
+          (tweet.referenced_tweets && tweet.referenced_tweets.some(ref => ref.type === 'retweeted'))) {
+        console.log('  ❌ Skipping retweet');
+        continue;
+      }
+
+      // Skip quote tweets
+      if (tweet.referenced_tweets && tweet.referenced_tweets.some(ref => ref.type === 'quoted')) {
+        console.log('  ❌ Skipping quote tweet');
+        continue;
+      }
+
+      // Check if tweet has media attachments
+      if (!tweet.attachments?.media_keys) {
+        console.log('  ❌ No media attachments');
+        continue;
+      }
+
+      const tweetMedia = mediaData.filter(media => 
+        tweet.attachments!.media_keys!.includes(media.media_key)
+      );
+
+      // Skip if contains video
+      const hasVideo = tweetMedia.some(media => 
+        media.type === 'video' || media.type === 'animated_gif'
+      );
+      if (hasVideo) {
+        console.log('  ❌ Contains video/gif, skipping');
+        continue;
+      }
+
+      // Find image media
+      const imageMedia = tweetMedia.find(media => media.type === 'photo');
+      if (!imageMedia?.url) {
+        console.log('  ❌ No photo media found');
+        continue;
+      }
+
+      console.log('✅ Found valid image post:');
+      console.log('- Post ID:', tweet.id);
+      console.log('- Created:', tweet.created_at);
+      console.log('- Text:', tweet.text.substring(0, 100) + (tweet.text.length > 100 ? '...' : ''));
+      console.log('- Image URL:', imageMedia.url);
+      console.log('- Media type:', imageMedia.type);
+      
+      return {
+        post: tweet as TwitterPost,
+        imageUrl: imageMedia.url
+      };
+    }
+
+    throw new Error('No valid image posts found in recent tweets (all filtered: reposts/retweets/videos/already posted)');
+
+  } catch (error: any) {
+    console.error('❌ Twitter API Error:', error.message);
+    
+    // Check for rate limit error specifically
+    if (error.code === 429) {
+      const resetTime = error.rateLimit?.reset;
+      if (resetTime) {
+        const waitTime = Math.ceil((resetTime * 1000 - Date.now()) / 1000 / 60);
+        console.error(`⏰ Rate limited! Try again in ${waitTime} minutes`);
+      }
+    }
+    
+    throw error;
+  }
+}
+
+async function createZoraCoin(post: TwitterPost, imageUrl: string, processedContent: string, linkToPost: string): Promise<string> {
+  console.log('🪙 Creating Zora Content Coin with actual tweet image...');
+
+  const ZORA_API_KEY = process.env.ZORA_API_KEY!;
+  const PRIVATE_KEY = process.env.PRIVY_PRIVATE_KEY as Hex;
+  const SMART_WALLET_ADDRESS = process.env.ZORA_SMART_WALLET_ADDRESS as Address;
+
+  // Set Zora API key
+  setApiKey(ZORA_API_KEY);
+
+  // Create EOA account from private key
+  const account = privateKeyToAccount(PRIVATE_KEY);
+
+  // Set up viem clients
+  const publicClient = createPublicClient({
+    chain: base,
+    transport: http(process.env.RPC_URL!),
+  });
+
+  const walletClient = createWalletClient({
+    account,
+    chain: base,
+    transport: http(process.env.RPC_URL!),
+  });
+
+  try {
+    // Generate name using last 3 numbers from post ID
+    const postIdNumbers = post.id.match(/\d/g); // Extract all digits
+    const last3Numbers = postIdNumbers ? postIdNumbers.slice(-3).join('') : '000';
+    const coinName = `tokenmetrics#${last3Numbers}`;
+    
+    // Use processed content with link format
+    const description = `${processedContent}\n${linkToPost}`;
+
+    // Generate symbol from last 3 numbers
+    const symbol = `TM${last3Numbers}`;
+
+    console.log('📸 Using actual tweet image with withImageURI approach...');
+    console.log('- Coin Name:', coinName);
+    console.log('- Symbol:', symbol);
+    console.log('- Description:', description.substring(0, 100) + '...');
+    console.log('- Image URL:', imageUrl);
+
+    // Use withImageURI to avoid File upload issues
+    console.log('🔗 Uploading metadata with tweet image...');
+    const { createMetadataParameters } = await createMetadataBuilder()
+      .withName(coinName)
+      .withSymbol(symbol)
+      .withDescription(description)
+      .withImageURI(imageUrl) // Use direct Twitter image URL
+      .upload(createZoraUploaderForCreator(SMART_WALLET_ADDRESS));
+
+    console.log('✅ Metadata uploaded successfully with tweet image');
+    console.log('🪙 Creating Content Coin on Zora...');
+
+    // Create the coin with uploaded metadata
+    const result = await createCoin({
+      call: {
+        creator: SMART_WALLET_ADDRESS,
+        ...createMetadataParameters,
+        currency: CreateConstants.ContentCoinCurrencies.ZORA,
+        chainId: base.id,
+        startingMarketCap: CreateConstants.StartingMarketCaps.LOW,
+      },
+      walletClient,
+      publicClient,
+    });
+
+    console.log('🎉 SUCCESS! Content Coin created with actual tweet image!');
+    console.log('Transaction hash:', result.hash);
+    console.log('Coin address:', result.address);
+    console.log('Coin name:', coinName);
+    console.log('Image used:', imageUrl);
+    
+    return result.hash;
+
+  } catch (error: any) {
+    console.error('❌ Coin creation failed:', error.message);
+    console.error('Full error:', error);
+    throw error;
+  }
+}
+
+async function main() {
+  console.log('🚀 Starting daily TokenMetrics Zora posting...');
+  console.log('Time:', new Date().toISOString());
+  console.log('💡 API Usage: Will make only 1 Twitter API call');
+
+  try {
+    // Step 1: Load deduplication data
+    console.log('📂 Loading posted tweets history...');
+    const alreadyPosted = await loadPostedTweets();
+    console.log(`📊 Found ${alreadyPosted.size} previously posted tweets`);
+
+    // Step 2: Get latest image post from Twitter (excluding already posted)
+    console.log('🔍 Searching for latest image post...');
+    const { post, imageUrl } = await getLatestImagePost(alreadyPosted);
+
+    // Step 3: Process content (detect threads and summarize if needed)
+    console.log('📝 Processing tweet content...');
+    const bearerToken = process.env.TWITTER_BEARER_TOKEN!;
+    const { content, firstTweetId } = await processTwitterContent(post, bearerToken);
+    const linkToPost = `https://x.com/tokenmetricsinc/status/${firstTweetId}`;
+    
+    console.log('✅ Processed content:', content.substring(0, 100) + '...');
+    console.log('🔗 Link to post:', linkToPost);
+
+    // Step 4: Create Zora Content Coin with processed content
+    console.log('🪙 Creating Zora Content Coin...');
+    const txHash = await createZoraCoin(post, imageUrl, content, linkToPost);
+
+    // Extract last 3 numbers from post ID for display
+    const postIdNumbers = post.id.match(/\d/g);
+    const last3Numbers = postIdNumbers ? postIdNumbers.slice(-3).join('') : '000';
+    const coinName = `tokenmetrics#${last3Numbers}`;
+
+    console.log('\\n🎊 DAILY POSTING COMPLETED SUCCESSFULLY!');
+    console.log('================================');
+    console.log('Twitter Post ID:', post.id);
+    console.log('Coin Name:', coinName);
+    console.log('Zora Transaction:', txHash);
+    console.log('Image URL:', imageUrl);
+    console.log('Created at:', new Date().toISOString());
+    console.log('\\n📊 Post Metrics:');
+    console.log('- Likes:', post.public_metrics.like_count);
+    console.log('- Retweets:', post.public_metrics.retweet_count);
+    console.log('- Replies:', post.public_metrics.reply_count);
+    console.log('\\n📝 Post Content:');
+    console.log('- Original Text:', post.text);
+    console.log('- Processed Content:', content);
+    console.log('- Link:', linkToPost);
+
+    // Step 5: Save to deduplication file
+    console.log('💾 Saving tweet ID to prevent reposting...');
+    await savePostedTweet({
+      tweetId: post.id,
+      coinName,
+      zoraTransaction: txHash,
+      postedAt: new Date().toISOString()
+    });
+
+    // Log success to file for monitoring
+    const logEntry = {
+      timestamp: new Date().toISOString(),
+      twitterPostId: post.id,
+      coinName,
+      zoraTransaction: txHash,
+      imageUrl,
+      originalText: post.text,
+      processedContent: content,
+      linkToPost,
+      metrics: post.public_metrics,
+      status: 'SUCCESS'
+    };
+    
+    await fs.appendFile('daily-posting.log', JSON.stringify(logEntry) + '\\n');
+
+  } catch (error: any) {
+    console.error('❌ Daily posting failed:', error.message);
+    console.error('Full error details:', error);
+    
+    // Log error to file
+    const logEntry = {
+      timestamp: new Date().toISOString(),
+      error: error.message,
+      errorDetails: error.stack || error.toString(),
+      status: 'FAILED'
+    };
+    
+    await fs.appendFile('daily-posting.log', JSON.stringify(logEntry) + '\\n');
+    
+    process.exit(1); // Exit with error code for cron monitoring
+  }
+}
+
+main().catch(console.error);
