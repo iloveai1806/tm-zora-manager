@@ -121,17 +121,73 @@ async function summarizeThread(tweets: TwitterPost[]): Promise<string> {
   try {
     const response = await openai.responses.create({
       model: 'gpt-4.1',
-      input: `Please summarize this Twitter thread concisely for social media use (under 250 characters):\n\n${threadText}`,
-      instructions: 'You are a helpful assistant that summarizes Twitter threads concisely. Provide a clear summary that captures the main points and key insights from the thread. Keep it under 250 characters for social media use.',
+      input: `Please summarize this Twitter thread for social media posting:\n\n${threadText}`,
+      instructions: `You are a social media content specialist. Summarize this Twitter thread following these guidelines:
+      
+      1. Remove any t.co shortened links (they start with https://t.co/)
+      2. Capture the main points and key insights from the thread
+      3. Maintain any important numbers, percentages, or metrics
+      4. Keep cryptocurrency symbols (like $ETH, $BTC, $TMAI, etc.)
+      5. Make the summary clear and engaging for social media
+      6. Keep under 250 characters for optimal readability
+      7. Don't add emojis unless they were in the original
+      8. Focus on the main value proposition or key insight
+      9. Create a cohesive summary that flows well
+      10. Remove any incomplete sentences
+      
+      Return only the cleaned, summarized content - no quotes, no explanations.`,
       max_output_tokens: 150
     });
 
     return response.output_text || '';
   } catch (error: any) {
     console.error('OpenAI API error:', error);
-    // Fallback: use first tweet's text if summarization fails
-    return tweets[0]?.text || '';
+    // Fallback: use first tweet's text with basic cleanup
+    return cleanTextBasic(tweets[0]?.text || '');
   }
+}
+
+// Unified AI content cleaning function for both single tweets and threads
+async function cleanAndOptimizeContent(content: string, isThread: boolean = false): Promise<string> {
+  const contentType = isThread ? 'Twitter thread summary' : 'tweet content';
+  const action = isThread ? 'summarized thread' : 'original tweet';
+  
+  try {
+    const response = await openai.responses.create({
+      model: 'gpt-4.1',
+      input: `Please clean and optimize this ${contentType} for social media posting:\n\n${content}`,
+      instructions: `You are a social media content specialist. Clean and optimize the given ${contentType} following these guidelines:
+      
+      1. Remove any t.co shortened links (they start with https://t.co/)
+      2. Keep the core message and key information intact
+      3. Maintain any important numbers, percentages, or metrics  
+      4. Keep cryptocurrency symbols (like $ETH, $BTC, $TMAI, etc.)
+      5. Make the text clear and engaging for social media
+      6. Keep under 250 characters for optimal readability
+      7. Don't add emojis unless they were in the original
+      8. If text appears truncated, work with what's available
+      9. Focus on the main value proposition or key insight
+      10. Remove any incomplete sentences at the end
+      11. ${isThread ? 'Ensure the summary captures the main thread points' : 'Preserve the original message intent'}
+      
+      Return only the cleaned, optimized content - no quotes, no explanations.`,
+      max_output_tokens: 150
+    });
+
+    return response.output_text || content;
+  } catch (error: any) {
+    console.error('OpenAI API error:', error);
+    // Fallback: basic cleanup
+    return cleanTextBasic(content);
+  }
+}
+
+// Basic text cleanup fallback function
+function cleanTextBasic(text: string): string {
+  return text
+    .replace(/https:\/\/t\.co\/\w+/g, '') // Remove t.co links
+    .replace(/\s+/g, ' ') // Normalize whitespace
+    .trim();
 }
 
 async function processTwitterContent(tweet: TwitterPost, bearerToken: string): Promise<{ content: string, firstTweetId: string }> {
@@ -139,9 +195,11 @@ async function processTwitterContent(tweet: TwitterPost, bearerToken: string): P
     console.log('🧵 Checking if tweet is part of a thread...');
     
     if (!isPartOfThread(tweet)) {
-      console.log('📝 Single tweet detected');
+      console.log('📝 Single tweet detected - applying AI cleaning and optimization');
+      const cleanedContent = await cleanAndOptimizeContent(tweet.text, false);
+      console.log('✨ Content cleaned and optimized by AI');
       return {
-        content: tweet.text,
+        content: cleanedContent,
         firstTweetId: tweet.id
       };
     }
@@ -165,8 +223,12 @@ async function processTwitterContent(tweet: TwitterPost, bearerToken: string): P
       console.log(`🧵 Found ${sortedTweets.length} tweets in thread, summarizing...`);
       const summary = await summarizeThread(sortedTweets);
       
+      // Apply additional AI cleaning to the thread summary
+      console.log('✨ Applying final AI optimization to thread summary...');
+      const cleanedSummary = await cleanAndOptimizeContent(summary, true);
+      
       return {
-        content: summary,
+        content: cleanedSummary,
         firstTweetId: firstTweet?.id || tweet.conversation_id
       };
       
