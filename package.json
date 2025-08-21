@@ -7,6 +7,8 @@
     "create-post": "tsx create-coin-direct.ts",
     "test-twitter": "tsx test-twitter-fetch.ts",
     "auto-post": "tsx auto-post-daily.ts",
+    "youtube-post": "tsx youtube-shorts-zora.ts",
+    "youtube-post-specific": "tsx youtube-shorts-zora.ts",
     "test-dedup": "tsx test-deduplication.ts",
     "check-cost": "tsx check-tx-cost.ts",
     "check-balance": "tsx check-balance.ts",

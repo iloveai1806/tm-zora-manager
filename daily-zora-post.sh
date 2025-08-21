@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# daily-zora-post.sh - Daily automated Zora posting from TokenMetrics Twitter
+# daily-zora-post.sh - Daily automated Zora posting from TokenMetrics YouTube Shorts
 # Runs at 10PM and 3AM GMT+7 daily
 
 # Set up environment
@@ -15,7 +15,7 @@ LOG_FILE="$SCRIPT_DIR/cron-execution.log"
 DATE_TIME=$(date '+%Y-%m-%d %H:%M:%S %Z')
 
 echo "=========================================" >> "$LOG_FILE"
-echo "Starting daily Zora posting: $DATE_TIME" >> "$LOG_FILE"
+echo "Starting daily YouTube Shorts Zora posting: $DATE_TIME" >> "$LOG_FILE"
 echo "Working directory: $SCRIPT_DIR" >> "$LOG_FILE"
 echo "=========================================" >> "$LOG_FILE"
 
@@ -36,16 +36,16 @@ if [ ! -d "node_modules" ]; then
     fi
 fi
 
-# Run the automated posting script
-echo "Executing auto-post-daily.ts..." >> "$LOG_FILE"
-pnpm tsx auto-post-daily.ts >> "$LOG_FILE" 2>&1
+# Run the automated posting script (YouTube Shorts in latest mode)
+echo "Executing youtube-shorts-zora.ts in latest mode..." >> "$LOG_FILE"
+pnpm tsx youtube-shorts-zora.ts >> "$LOG_FILE" 2>&1
 EXIT_CODE=$?
 
 if [ $EXIT_CODE -eq 0 ]; then
-    echo "SUCCESS: Daily posting completed successfully at $DATE_TIME" >> "$LOG_FILE"
-    echo "Check daily-posting.log for detailed results" >> "$LOG_FILE"
+    echo "SUCCESS: Daily YouTube Shorts posting completed successfully at $DATE_TIME" >> "$LOG_FILE"
+    echo "Check youtube-posting.log for detailed results" >> "$LOG_FILE"
 else
-    echo "ERROR: Daily posting failed with exit code $EXIT_CODE at $DATE_TIME" >> "$LOG_FILE"
+    echo "ERROR: Daily YouTube Shorts posting failed with exit code $EXIT_CODE at $DATE_TIME" >> "$LOG_FILE"
     echo "Check logs above for error details" >> "$LOG_FILE"
 fi
 

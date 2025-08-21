@@ -78,29 +78,9 @@ function isPartOfThread(tweet: TwitterPost): boolean {
   return hasRepliedTo || isReply;
 }
 
-async function getFullThread(conversationId: string, bearerToken: string): Promise<TwitterPost[]> {
-  const url = `https://api.twitter.com/2/tweets/search/recent`;
-  const params = new URLSearchParams({
-    query: `conversation_id:${conversationId}`,
-    'tweet.fields': 'conversation_id,in_reply_to_user_id,author_id,created_at,referenced_tweets,public_metrics,attachments',
-    'expansions': 'author_id,in_reply_to_user_id,referenced_tweets.id,attachments.media_keys',
-    'media.fields': 'type,url,preview_image_url,width,height',
-    'max_results': '100'
-  });
-
-  const response = await fetch(`${url}?${params}`, {
-    headers: {
-      'Authorization': `Bearer ${bearerToken}`,
-      'Content-Type': 'application/json'
-    }
-  });
-
-  if (!response.ok) {
-    throw new Error(`Twitter API error: ${response.status} ${response.statusText}`);
-  }
-
-  const data = await response.json();
-  return data.data || [];
+// Get thread tweets from the already fetched timeline data
+function getThreadFromTimeline(conversationId: string, timelineData: TwitterPost[]): TwitterPost[] {
+  return timelineData.filter(tweet => tweet.conversation_id === conversationId);
 }
 
 function findFirstTweet(tweets: TwitterPost[]): TwitterPost | undefined {
@@ -125,15 +105,17 @@ async function summarizeThread(tweets: TwitterPost[]): Promise<string> {
       instructions: `You are a social media content specialist. Summarize this Twitter thread following these guidelines:
       
       1. Remove any t.co shortened links (they start with https://t.co/)
-      2. Capture the main points and key insights from the thread
-      3. Maintain any important numbers, percentages, or metrics
-      4. Keep cryptocurrency symbols (like $ETH, $BTC, $TMAI, etc.)
-      5. Make the summary clear and engaging for social media
-      6. Keep under 250 characters for optimal readability
-      7. Don't add emojis unless they were in the original
-      8. Focus on the main value proposition or key insight
-      9. Create a cohesive summary that flows well
-      10. Remove any incomplete sentences
+      2. Remove any hashtags (#) - strip them completely
+      3. Capture the main points and key insights from the thread
+      4. Maintain any important numbers, percentages, or metrics
+      5. Keep cryptocurrency symbols (like $ETH, $BTC, $TMAI, etc.)
+      6. Make the summary clear and engaging for social media
+      7. Keep under 250 characters for optimal readability
+      8. Don't add emojis unless they were in the original
+      9. Focus on the main value proposition or key insight
+      10. Create a cohesive summary that flows well
+      11. Remove any incomplete sentences
+      12. Remove any links or URLs completely
       
       Return only the cleaned, summarized content - no quotes, no explanations.`,
       max_output_tokens: 150
@@ -159,16 +141,18 @@ async function cleanAndOptimizeContent(content: string, isThread: boolean = fals
       instructions: `You are a social media content specialist. Clean and optimize the given ${contentType} following these guidelines:
       
       1. Remove any t.co shortened links (they start with https://t.co/)
-      2. Keep the core message and key information intact
-      3. Maintain any important numbers, percentages, or metrics  
-      4. Keep cryptocurrency symbols (like $ETH, $BTC, $TMAI, etc.)
-      5. Make the text clear and engaging for social media
-      6. Keep under 250 characters for optimal readability
-      7. Don't add emojis unless they were in the original
-      8. If text appears truncated, work with what's available
-      9. Focus on the main value proposition or key insight
-      10. Remove any incomplete sentences at the end
-      11. ${isThread ? 'Ensure the summary captures the main thread points' : 'Preserve the original message intent'}
+      2. Remove any hashtags (#) - strip them completely
+      3. Keep the core message and key information intact
+      4. Maintain any important numbers, percentages, or metrics  
+      5. Keep cryptocurrency symbols (like $ETH, $BTC, $TMAI, etc.)
+      6. Make the text clear and engaging for social media
+      7. Keep under 250 characters for optimal readability
+      8. Don't add emojis unless they were in the original
+      9. If text appears truncated, work with what's available
+      10. Focus on the main value proposition or key insight
+      11. Remove any incomplete sentences at the end
+      12. Remove any links or URLs completely
+      13. ${isThread ? 'Ensure the summary captures the main thread points' : 'Preserve the original message intent'}
       
       Return only the cleaned, optimized content - no quotes, no explanations.`,
       max_output_tokens: 150
@@ -190,7 +174,7 @@ function cleanTextBasic(text: string): string {
     .trim();
 }
 
-async function processTwitterContent(tweet: TwitterPost, bearerToken: string): Promise<{ content: string, firstTweetId: string }> {
+async function processTwitterContent(tweet: TwitterPost, timelineData: TwitterPost[]): Promise<{ content: string, firstTweetId: string }> {
   try {
     console.log('🧵 Checking if tweet is part of a thread...');
     
@@ -204,21 +188,22 @@ async function processTwitterContent(tweet: TwitterPost, bearerToken: string): P
       };
     }
 
-    console.log('🧵 Thread detected, fetching full thread...');
+    console.log('🧵 Thread detected, extracting thread from timeline data...');
     
     try {
-      const allTweets = await getFullThread(tweet.conversation_id, bearerToken);
+      const threadTweets = getThreadFromTimeline(tweet.conversation_id, timelineData);
       
-      if (allTweets.length <= 1) {
-        console.log('📝 Only one tweet in thread, using original content');
+      if (threadTweets.length <= 1) {
+        console.log('📝 Only one tweet in thread found in timeline, using original content');
+        const cleanedContent = await cleanAndOptimizeContent(tweet.text, false);
         return {
-          content: tweet.text,
+          content: cleanedContent,
           firstTweetId: tweet.id
         };
       }
 
-      const sortedTweets = sortThreadChronologically(allTweets);
-      const firstTweet = findFirstTweet(allTweets);
+      const sortedTweets = sortThreadChronologically(threadTweets);
+      const firstTweet = findFirstTweet(threadTweets);
       
       console.log(`🧵 Found ${sortedTweets.length} tweets in thread, summarizing...`);
       const summary = await summarizeThread(sortedTweets);
@@ -233,9 +218,10 @@ async function processTwitterContent(tweet: TwitterPost, bearerToken: string): P
       };
       
     } catch (error: any) {
-      console.warn('⚠️ Failed to fetch thread, using original tweet:', error.message);
+      console.warn('⚠️ Failed to process thread, using original tweet:', error.message);
+      const cleanedContent = await cleanAndOptimizeContent(tweet.text, false);
       return {
-        content: tweet.text,
+        content: cleanedContent,
         firstTweetId: tweet.conversation_id
       };
     }
@@ -300,7 +286,7 @@ async function savePostedTweet(record: PostedTweetRecord): Promise<void> {
   }
 }
 
-async function getLatestImagePost(alreadyPosted: Set<string>): Promise<{ post: TwitterPost, imageUrl: string }> {
+async function getLatestImagePost(alreadyPosted: Set<string>): Promise<{ post: TwitterPost, imageUrl: string, timelineData: TwitterPost[] }> {
   console.log('🐦 Fetching latest post from @tokenmetricsinc...');
   console.log('💡 Optimized for minimal API usage');
   
@@ -316,10 +302,10 @@ async function getLatestImagePost(alreadyPosted: Set<string>): Promise<{ post: T
     const userId = '1136430327176581120'; // @tokenmetricsinc
     console.log('✅ Using cached user ID for @tokenmetricsinc');
 
-    // Get recent tweets with media - optimized to 10 tweets max to save API quota
-    console.log('📡 Making single API call for tweets (max 10)...');
+    // Get recent tweets with media - fetch 20 to capture potential thread content
+    console.log('📡 Making single API call for tweets (max 20)...');
     const tweets = await twitterClient.v2.userTimeline(userId, {
-      max_results: 10, // Reduced from 20 to minimize API usage
+      max_results: 20, // Increased to capture thread content in single call
       'tweet.fields': ['created_at', 'public_metrics', 'attachments', 'referenced_tweets', 'conversation_id'],
       'media.fields': ['type', 'url', 'preview_image_url', 'width', 'height'],
       expansions: ['attachments.media_keys'],
@@ -348,11 +334,14 @@ async function getLatestImagePost(alreadyPosted: Set<string>): Promise<{ post: T
         continue;
       }
       
-      // Skip replies (tweets that start with @username or have referenced_tweets of type 'replied_to')
-      if (tweet.text.startsWith('@') || 
-          (tweet.referenced_tweets && tweet.referenced_tweets.some(ref => ref.type === 'replied_to'))) {
-        console.log('  ❌ Skipping reply tweet');
-        continue;
+      // Skip replies to OTHER users (but allow self-replies which are threads)
+      if (tweet.text.startsWith('@')) {
+        // Check if it's replying to someone else (not a self-thread)
+        const replyMatch = tweet.text.match(/^@(\w+)/);
+        if (replyMatch && replyMatch[1] !== 'tokenmetricsinc') {
+          console.log('  ❌ Skipping reply to other user');
+          continue;
+        }
       }
 
       // Skip retweets (tweets that start with RT or have referenced_tweets of type 'retweeted')
@@ -403,7 +392,8 @@ async function getLatestImagePost(alreadyPosted: Set<string>): Promise<{ post: T
       
       return {
         post: tweet as TwitterPost,
-        imageUrl: imageMedia.url
+        imageUrl: imageMedia.url,
+        timelineData: tweetData as TwitterPost[]
       };
     }
 
@@ -451,16 +441,15 @@ async function createZoraCoin(post: TwitterPost, imageUrl: string, processedCont
   });
 
   try {
-    // Generate name using last 3 numbers from post ID
-    const postIdNumbers = post.id.match(/\d/g); // Extract all digits
-    const last3Numbers = postIdNumbers ? postIdNumbers.slice(-3).join('') : '000';
-    const coinName = `tokenmetrics#${last3Numbers}`;
+    // Generate name using last 5-6 characters from post ID for better uniqueness  
+    const postIdHash = post.id.slice(-6); // Use last 6 characters of post ID
+    const coinName = `tokenmetrics#${postIdHash}`;
     
-    // Use processed content with link format
-    const description = `${processedContent}\n${linkToPost}`;
+    // Use processed content without link
+    const description = processedContent;
 
-    // Generate symbol from last 3 numbers
-    const symbol = `TM${last3Numbers}`;
+    // Generate symbol from post ID hash
+    const symbol = `TM${postIdHash.toUpperCase()}`;
 
     console.log('📸 Using actual tweet image with withImageURI approach...');
     console.log('- Coin Name:', coinName);
@@ -521,12 +510,11 @@ async function main() {
 
     // Step 2: Get latest image post from Twitter (excluding already posted)
     console.log('🔍 Searching for latest image post...');
-    const { post, imageUrl } = await getLatestImagePost(alreadyPosted);
+    const { post, imageUrl, timelineData } = await getLatestImagePost(alreadyPosted);
 
     // Step 3: Process content (detect threads and summarize if needed)
     console.log('📝 Processing tweet content...');
-    const bearerToken = process.env.TWITTER_BEARER_TOKEN!;
-    const { content, firstTweetId } = await processTwitterContent(post, bearerToken);
+    const { content, firstTweetId } = await processTwitterContent(post, timelineData);
     const linkToPost = `https://x.com/tokenmetricsinc/status/${firstTweetId}`;
     
     console.log('✅ Processed content:', content.substring(0, 100) + '...');
@@ -536,10 +524,9 @@ async function main() {
     console.log('🪙 Creating Zora Content Coin...');
     const txHash = await createZoraCoin(post, imageUrl, content, linkToPost);
 
-    // Extract last 3 numbers from post ID for display
-    const postIdNumbers = post.id.match(/\d/g);
-    const last3Numbers = postIdNumbers ? postIdNumbers.slice(-3).join('') : '000';
-    const coinName = `tokenmetrics#${last3Numbers}`;
+    // Extract post ID hash for display
+    const postIdHash = post.id.slice(-6);
+    const coinName = `tokenmetrics#${postIdHash}`;
 
     console.log('\\n🎊 DAILY POSTING COMPLETED SUCCESSFULLY!');
     console.log('================================');
