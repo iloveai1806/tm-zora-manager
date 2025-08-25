@@ -4,5 +4,27 @@
     "coinName": "tokenmetrics#1FTZTU",
     "zoraTransaction": "0x27f8831181e1cf00d1fbafe66d5c3cb1f0af584feb799be19b1f66a79eb65ffc",
     "postedAt": "2025-08-20T02:57:30.447Z"
+  },
+  {
+    "timestamp": "2025-08-22T16:05:33.468Z",
+    "mode": "specific",
+    "youtubeVideoId": "KcHeO5rFlYg",
+    "videoTitle": "What's Driving ETHENA's 130% Surge?",
+    "coinName": "What's Driving ETHENA's 130% Surge?",
+    "zoraTransaction": "0x62abe99b29f3ea47e47a5abace20089425639b6857220529e2eb8000828b02a6",
+    "youtubeUrl": "https://youtube.com/shorts/KcHeO5rFlYg",
+    "publishedAt": "2025-08-21T17:17:16Z",
+    "status": "SUCCESS"
+  },
+  {
+    "timestamp": "2025-08-22T16:08:54.182Z",
+    "mode": "specific",
+    "youtubeVideoId": "usBNs_4t4Ck",
+    "videoTitle": "Ethereum's 50% Surge: What's Next?",
+    "coinName": "Ethereum's 50% Surge: What's Next?",
+    "zoraTransaction": "0xb993c66362381286584d6e42ecc875c2c3a39d3777c137e6a91054a12f0dd5b6",
+    "youtubeUrl": "https://youtube.com/shorts/usBNs_4t4Ck",
+    "publishedAt": "2025-08-22T13:19:59Z",
+    "status": "SUCCESS"
   }
 ]
