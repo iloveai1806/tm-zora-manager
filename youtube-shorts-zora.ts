@@ -110,10 +110,10 @@ async function getSpecificVideo(videoId: string): Promise<YouTubeVideo> {
 }
 
 async function getLatestShorts(alreadyPosted: Set<string>): Promise<YouTubeVideo> {
-  console.log('🎥 Fetching latest videos from TokenMetrics channel...');
+  console.log('🎥 Fetching latest video from TokenMetrics channel...');
   
   const apiKey = process.env.YOUTUBE_API_KEY!;
-  const maxResults = 20; // Get recent videos
+  const maxResults = 1; // Get only the latest video
   
   try {
     // First, get the channel's uploads playlist
@@ -151,42 +151,39 @@ async function getLatestShorts(alreadyPosted: Set<string>): Promise<YouTubeVideo
       throw new Error('No videos found in channel');
     }
     
-    console.log(`📊 Found ${data.items.length} recent videos`);
+    console.log(`📊 Found ${data.items.length} video (latest)`);
     console.log(`🔍 Already posted: ${alreadyPosted.size} videos tracked`);
     
-    // Find the latest video that hasn't been posted yet
-    for (const item of data.items) {
-      const videoId = item.snippet.resourceId.videoId;
-      const title = item.snippet.title;
-      const description = item.snippet.description;
-      const publishedAt = item.snippet.publishedAt;
-      const thumbnailUrl = item.snippet.thumbnails?.maxres?.url || 
-                          item.snippet.thumbnails?.high?.url ||
-                          item.snippet.thumbnails?.medium?.url;
-      
-      console.log(`🔍 Checking video: ${videoId}...`);
-      console.log(`  Title: ${title.substring(0, 50)}...`);
-      console.log(`  Published: ${publishedAt}`);
-      
-      // Skip already posted videos
-      if (alreadyPosted.has(videoId)) {
-        console.log('  ❌ Already posted to Zora - skipping');
-        continue;
-      }
-      
-      console.log('✅ Found new video to post!');
-      
-      return {
-        id: videoId,
-        title,
-        description,
-        publishedAt,
-        thumbnailUrl,
-        channelTitle: item.snippet.channelTitle
-      };
+    // Get the single latest video
+    const item = data.items[0];
+    const videoId = item.snippet.resourceId.videoId;
+    const title = item.snippet.title;
+    const description = item.snippet.description;
+    const publishedAt = item.snippet.publishedAt;
+    const thumbnailUrl = item.snippet.thumbnails?.maxres?.url || 
+                        item.snippet.thumbnails?.high?.url ||
+                        item.snippet.thumbnails?.medium?.url;
+    
+    console.log(`🔍 Checking latest video: ${videoId}...`);
+    console.log(`  Title: ${title.substring(0, 50)}...`);
+    console.log(`  Published: ${publishedAt}`);
+    
+    // Check if already posted
+    if (alreadyPosted.has(videoId)) {
+      console.log('  ❌ Latest video already posted to Zora');
+      throw new Error('Latest video has already been posted');
     }
     
-    throw new Error('No new videos found (all already posted)');
+    console.log('✅ Latest video is new - ready to post!');
+    
+    return {
+      id: videoId,
+      title,
+      description,
+      publishedAt,
+      thumbnailUrl,
+      channelTitle: item.snippet.channelTitle
+    };
     
   } catch (error: any) {
     console.error('❌ YouTube API Error:', error.message);
