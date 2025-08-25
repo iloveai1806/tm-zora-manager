@@ -207,89 +207,114 @@ async function downloadShortVideo(videoId: string): Promise<{ videoPath: string,
   const downloadsDir = path.join(__dirname, 'downloads');
   await fs.mkdir(downloadsDir, { recursive: true });
   
-  try {
-    // Use yt-dlp to download the video and thumbnail
-    const { spawn } = require('child_process');
+  // Different format strategies to try in order
+  const formatStrategies = [
+    // Strategy 1: Specific formats with English audio
+    '232+233-9/231+233-9/230+233-9',
+    // Strategy 2: Specific formats with any audio
+    '232+233/231+233/230+233',
+    // Strategy 3: Best video with audio under 720p
+    'best[height<=720]',
+    // Strategy 4: Best mp4 format
+    'best[ext=mp4]',
+    // Strategy 5: Just best overall
+    'best'
+  ];
+  
+  for (let i = 0; i < formatStrategies.length; i++) {
+    const formatString = formatStrategies[i];
+    console.log(`🔧 Trying format strategy ${i + 1}/${formatStrategies.length}: ${formatString}`);
     
-    console.log('🔧 Using yt-dlp to download video...');
-    
-    // Download video with thumbnail - use better output template
-    const downloadProcess = spawn('yt-dlp', [
-      `https://www.youtube.com/watch?v=${videoId}`,
-      '-f', '232+233/231+233/230+233/best', // Select video+audio format that works for shorts
-      '-o', `${downloadsDir}/${videoId}.%(ext)s`, // Better output template
-      '--write-thumbnail',
-      '--convert-thumbnails', 'jpg',
-      '--no-playlist'
-    ]);
-    
-    // Capture output for debugging
-    let stdout = '';
-    let stderr = '';
-    
-    downloadProcess.stdout.on('data', (data: Buffer) => {
-      stdout += data.toString();
-    });
-    
-    downloadProcess.stderr.on('data', (data: Buffer) => {
-      stderr += data.toString();
-    });
-    
-    return new Promise((resolve, reject) => {
-      downloadProcess.on('close', async (code: number) => {
-        if (code === 0) {
-          console.log('✅ Video downloaded successfully');
-          
-          // Expected file paths
-          const videoPath = path.join(downloadsDir, `${videoId}.mp4`);
-          const thumbnailPath = path.join(downloadsDir, `${videoId}.jpg`);
-          
-          // Check if files exist
-          const videoExists = await fs.access(videoPath).then(() => true).catch(() => false);
-          const thumbExists = await fs.access(thumbnailPath).then(() => true).catch(() => false);
-          
-          if (videoExists && thumbExists) {
-            console.log('📱 Video file:', videoPath);
-            console.log('🖼️ Thumbnail file:', thumbnailPath);
-            resolve({ videoPath, thumbnailPath });
-          } else {
-            // Try to find the actual files
-            console.log('🔍 Searching for downloaded files...');
-            try {
-              const files = await fs.readdir(downloadsDir);
-              const videoFile = files.find(f => f.startsWith(videoId) && (f.endsWith('.mp4') || f.endsWith('.webm')));
-              const thumbFile = files.find(f => f.startsWith(videoId) && f.endsWith('.jpg'));
-              
-              if (videoFile && thumbFile) {
-                const actualVideoPath = path.join(downloadsDir, videoFile);
-                const actualThumbPath = path.join(downloadsDir, thumbFile);
-                console.log('📱 Found video file:', actualVideoPath);
-                console.log('🖼️ Found thumbnail file:', actualThumbPath);
-                resolve({ videoPath: actualVideoPath, thumbnailPath: actualThumbPath });
-              } else {
-                console.log('Available files:', files);
-                reject(new Error(`Downloaded files not found. Video: ${videoFile}, Thumbnail: ${thumbFile}`));
-              }
-            } catch (listError) {
-              reject(new Error(`Failed to list downloaded files: ${listError}`));
-            }
-          }
-        } else {
-          console.error('yt-dlp stdout:', stdout);
-          console.error('yt-dlp stderr:', stderr);
-          reject(new Error(`yt-dlp failed with exit code ${code}`));
-        }
-      });
-      
-      downloadProcess.on('error', (error: Error) => {
-        reject(new Error(`yt-dlp spawn error: ${error.message}`));
-      });
-    });
-    
-  } catch (error: any) {
-    console.error('❌ Download failed:', error.message);
-    throw error;
+    try {
+      const result = await tryDownloadWithFormat(videoId, downloadsDir, formatString);
+      console.log(`✅ Success with format strategy ${i + 1}!`);
+      return result;
+    } catch (error: any) {
+      console.log(`❌ Format strategy ${i + 1} failed:`, error.message);
+      if (i === formatStrategies.length - 1) {
+        // Last strategy failed, throw the error
+        throw error;
+      }
+      // Continue to next strategy
+    }
   }
+  
+  throw new Error('All format strategies failed');
+}
+
+async function tryDownloadWithFormat(videoId: string, downloadsDir: string, formatString: string): Promise<{ videoPath: string, thumbnailPath: string }> {
+  const { spawn } = require('child_process');
+  
+  const downloadProcess = spawn('yt-dlp', [
+    `https://www.youtube.com/watch?v=${videoId}`,
+    '-f', formatString,
+    '-o', `${downloadsDir}/${videoId}.%(ext)s`,
+    '--write-thumbnail',
+    '--convert-thumbnails', 'jpg',
+    '--no-playlist',
+    '--merge-output-format', 'mp4' // Try to ensure mp4 output
+  ]);
+  
+  // Capture output for debugging
+  let stdout = '';
+  let stderr = '';
+  
+  downloadProcess.stdout.on('data', (data: Buffer) => {
+    stdout += data.toString();
+  });
+  
+  downloadProcess.stderr.on('data', (data: Buffer) => {
+    stderr += data.toString();
+  });
+  
+  return new Promise((resolve, reject) => {
+    downloadProcess.on('close', async (code: number) => {
+      if (code === 0) {
+        // Expected file paths
+        const videoPath = path.join(downloadsDir, `${videoId}.mp4`);
+        const thumbnailPath = path.join(downloadsDir, `${videoId}.jpg`);
+        
+        // Check if files exist
+        const videoExists = await fs.access(videoPath).then(() => true).catch(() => false);
+        const thumbExists = await fs.access(thumbnailPath).then(() => true).catch(() => false);
+        
+        if (videoExists && thumbExists) {
+          console.log('📱 Video file:', videoPath);
+          console.log('🖼️ Thumbnail file:', thumbnailPath);
+          resolve({ videoPath, thumbnailPath });
+        } else {
+          // Try to find the actual files
+          console.log('🔍 Searching for downloaded files...');
+          try {
+            const files = await fs.readdir(downloadsDir);
+            const videoFile = files.find(f => f.startsWith(videoId) && (f.endsWith('.mp4') || f.endsWith('.webm') || f.endsWith('.mkv')));
+            const thumbFile = files.find(f => f.startsWith(videoId) && f.endsWith('.jpg'));
+            
+            if (videoFile && thumbFile) {
+              const actualVideoPath = path.join(downloadsDir, videoFile);
+              const actualThumbPath = path.join(downloadsDir, thumbFile);
+              console.log('📱 Found video file:', actualVideoPath);
+              console.log('🖼️ Found thumbnail file:', actualThumbPath);
+              resolve({ videoPath: actualVideoPath, thumbnailPath: actualThumbPath });
+            } else {
+              console.log('Available files:', files);
+              reject(new Error(`Downloaded files not found. Video: ${videoFile}, Thumbnail: ${thumbFile}`));
+            }
+          } catch (listError) {
+            reject(new Error(`Failed to list downloaded files: ${listError}`));
+          }
+        }
+      } else {
+        console.log('yt-dlp stdout:', stdout);
+        console.log('yt-dlp stderr:', stderr);
+        reject(new Error(`yt-dlp failed with exit code ${code}: ${stderr}`));
+      }
+    });
+    
+    downloadProcess.on('error', (error: Error) => {
+      reject(new Error(`yt-dlp spawn error: ${error.message}`));
+    });
+  });
 }
 
 async function optimizeContentWithAI(title: string, description: string): Promise<string> {
