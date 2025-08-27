@@ -197,12 +197,54 @@ async function getLatestShorts(alreadyPosted: Set<string>): Promise<YouTubeVideo
   }
 }
 
+async function listAvailableFormats(videoId: string): Promise<void> {
+  console.log(`🔍 Checking available formats for video: ${videoId}...`);
+  const { spawn } = require('child_process');
+  
+  const listProcess = spawn('yt-dlp', [
+    `https://www.youtube.com/watch?v=${videoId}`,
+    '--list-formats',
+    '--no-playlist'
+  ]);
+  
+  let stdout = '';
+  let stderr = '';
+  
+  listProcess.stdout.on('data', (data: Buffer) => {
+    stdout += data.toString();
+  });
+  
+  listProcess.stderr.on('data', (data: Buffer) => {
+    stderr += data.toString();
+  });
+  
+  return new Promise((resolve) => {
+    listProcess.on('close', (code: number) => {
+      if (code === 0 && stdout) {
+        console.log('📋 Available formats:');
+        console.log(stdout);
+      } else {
+        console.log('⚠️ Could not list formats:', stderr);
+      }
+      resolve();
+    });
+    
+    listProcess.on('error', (error: Error) => {
+      console.log('⚠️ Format listing error:', error.message);
+      resolve();
+    });
+  });
+}
+
 async function downloadShortVideo(videoId: string): Promise<{ videoPath: string, thumbnailPath: string }> {
   console.log(`📥 Downloading video: ${videoId}...`);
   
   // Create downloads directory in project root if it doesn't exist
   const downloadsDir = path.join(__dirname, 'downloads');
   await fs.mkdir(downloadsDir, { recursive: true });
+  
+  // First, try to list available formats for debugging
+  await listAvailableFormats(videoId);
   
   // Different format strategies to try in order
   const formatStrategies = [
@@ -215,12 +257,14 @@ async function downloadShortVideo(videoId: string): Promise<{ videoPath: string,
     // Strategy 4: Best mp4 format
     'best[ext=mp4]',
     // Strategy 5: Just best overall
-    'best'
+    'best',
+    // Strategy 6: No format specification (let yt-dlp decide)
+    null
   ];
   
   for (let i = 0; i < formatStrategies.length; i++) {
     const formatString = formatStrategies[i];
-    console.log(`🔧 Trying format strategy ${i + 1}/${formatStrategies.length}: ${formatString}`);
+    console.log(`🔧 Trying format strategy ${i + 1}/${formatStrategies.length}: ${formatString || 'auto-select'}`);
     
     try {
       const result = await tryDownloadWithFormat(videoId, downloadsDir, formatString);
@@ -239,18 +283,29 @@ async function downloadShortVideo(videoId: string): Promise<{ videoPath: string,
   throw new Error('All format strategies failed');
 }
 
-async function tryDownloadWithFormat(videoId: string, downloadsDir: string, formatString: string): Promise<{ videoPath: string, thumbnailPath: string }> {
+async function tryDownloadWithFormat(videoId: string, downloadsDir: string, formatString: string | null): Promise<{ videoPath: string, thumbnailPath: string }> {
   const { spawn } = require('child_process');
   
-  const downloadProcess = spawn('yt-dlp', [
+  const args = [
     `https://www.youtube.com/watch?v=${videoId}`,
-    '-f', formatString,
     '-o', `${downloadsDir}/${videoId}.%(ext)s`,
     '--write-thumbnail',
     '--convert-thumbnails', 'jpg',
     '--no-playlist',
-    '--merge-output-format', 'mp4' // Try to ensure mp4 output
-  ]);
+    '--merge-output-format', 'mp4',
+    '--user-agent', 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    '--referer', 'https://www.youtube.com/',
+    '--add-header', 'Accept-Language:en-US,en;q=0.9',
+    '--sleep-interval', '1',
+    '--max-sleep-interval', '3'
+  ];
+  
+  // Only add format specification if provided
+  if (formatString) {
+    args.splice(1, 0, '-f', formatString);
+  }
+  
+  const downloadProcess = spawn('yt-dlp', args);
   
   // Capture output for debugging
   let stdout = '';
