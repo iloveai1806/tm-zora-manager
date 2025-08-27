@@ -243,44 +243,18 @@ async function downloadShortVideo(videoId: string): Promise<{ videoPath: string,
   const downloadsDir = path.join(__dirname, 'downloads');
   await fs.mkdir(downloadsDir, { recursive: true });
   
-  // First, try to list available formats for debugging
-  await listAvailableFormats(videoId);
+  // Use auto-select format (no -f flag) - this works best with YouTube's current restrictions
+  console.log('🔧 Using auto-select format strategy (recommended)');
   
-  // Different format strategies to try in order
-  const formatStrategies = [
-    // Strategy 1: Specific formats with English audio
-    '232+233-9/231+233-9/230+233-9',
-    // Strategy 2: Specific formats with any audio
-    '232+233/231+233/230+233',
-    // Strategy 3: Best video with audio under 720p
-    'best[height<=720]',
-    // Strategy 4: Best mp4 format
-    'best[ext=mp4]',
-    // Strategy 5: Just best overall
-    'best',
-    // Strategy 6: No format specification (let yt-dlp decide)
-    null
-  ];
-  
-  for (let i = 0; i < formatStrategies.length; i++) {
-    const formatString = formatStrategies[i];
-    console.log(`🔧 Trying format strategy ${i + 1}/${formatStrategies.length}: ${formatString || 'auto-select'}`);
-    
-    try {
-      const result = await tryDownloadWithFormat(videoId, downloadsDir, formatString);
-      console.log(`✅ Success with format strategy ${i + 1}!`);
-      return result;
-    } catch (error: any) {
-      console.log(`❌ Format strategy ${i + 1} failed:`, error.message);
-      if (i === formatStrategies.length - 1) {
-        // Last strategy failed, throw the error
-        throw error;
-      }
-      // Continue to next strategy
-    }
+  try {
+    const result = await tryDownloadWithFormat(videoId, downloadsDir, null);
+    console.log('✅ Video download successful!');
+    return result;
+  } catch (error: any) {
+    console.log('❌ Auto-select failed, trying with format listing for debugging...');
+    await listAvailableFormats(videoId);
+    throw error;
   }
-  
-  throw new Error('All format strategies failed');
 }
 
 async function tryDownloadWithFormat(videoId: string, downloadsDir: string, formatString: string | null): Promise<{ videoPath: string, thumbnailPath: string }> {
